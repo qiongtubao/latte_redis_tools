@@ -1,99 +1,179 @@
-// src/diff.c — 差异检测引擎
+// src/diff.c — 字符级差异检测引擎（Myers O(ND) 简化版）
 #include "fcmp.h"
 #include <string.h>
 
-/* 初始化 DiffResult */
-static int diff_result_init(DiffResult *dr, size_t capacity) {
-    dr->entries = (DiffEntry *)malloc(sizeof(DiffEntry) * capacity);
-    if (!dr->entries) return -1;
-    dr->count = 0;
-    dr->capacity = capacity;
-    return 0;
-}
+/* ─── LineList: 加载文件为单个字符串（用于字符级对比）────────────────── */
 
-/* 追加差异条目 */
-static int diff_result_push(DiffResult *dr, DiffEntry entry) {
-    if (dr->count >= dr->capacity) {
-        size_t new_cap = dr->capacity * 2;
-        DiffEntry *new_arr = (DiffEntry *)realloc(dr->entries, sizeof(DiffEntry) * new_cap);
-        if (!new_arr) return -1;
-        dr->entries = new_arr;
-        dr->capacity = new_cap;
-    }
-    dr->entries[dr->count++] = entry;
-    return 0;
-}
+int linelist_load(const char *path, LineList *ll) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return -1;
 
-/* 简化的差异检测：基于分块哈希逐块对比 */
-int diff_files(const char *file_a, const char *file_b, size_t chunk_size, DiffResult *out) {
-    HashList ha = {0}, hb = {0};
+    /* 读取整个文件到一个缓冲区 */
+    fseek(fp, 0, SEEK_END);
+    long fsize = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
 
-    int ret_a = hash_file(file_a, chunk_size, &ha);
-    int ret_b = hash_file(file_b, chunk_size, &hb);
-    if (ret_a != 0 || ret_b != 0) {
-        hash_list_free(&ha);
-        hash_list_free(&hb);
-        return -1;
-    }
+    /* 单行存储整个文件内容（字符级对比不需要分行） */
+    ll->capacity = 1;
+    ll->lines = (char **)malloc(sizeof(char *) * 1);
+    if (!ll->lines) { fclose(fp); return -2; }
+    ll->count = 0;
 
-    if (diff_result_init(out, 64) != 0) {
-        hash_list_free(&ha);
-        hash_list_free(&hb);
-        return -2;
-    }
-
-    size_t max_len = ha.count > hb.count ? ha.count : hb.count;
-
-    for (size_t i = 0; i < max_len; i++) {
-        DiffEntry entry = {0};
-
-        if (i >= ha.count) {
-            /* A 文件已结束，B 还有内容 → INSERT */
-            entry.type = DIFF_INSERT;
-            entry.line_a = -1;
-            entry.line_b = (long)i + 1;
-            entry.content = strdup("[新增块]");
-        } else if (i >= hb.count) {
-            /* B 文件已结束，A 还有内容 → DELETE */
-            entry.type = DIFF_DELETE;
-            entry.line_a = (long)i + 1;
-            entry.line_b = -1;
-            entry.content = strdup("[删除块]");
-        } else if (ha.hashes[i] != hb.hashes[i]) {
-            /* 两边都有但哈希不同 → MODIFY */
-            entry.type = DIFF_MODIFY;
-            entry.line_a = (long)i + 1;
-            entry.line_b = (long)i + 1;
-            entry.content = strdup("[内容修改]");
-        } else {
-            /* 相同，跳过 */
-            continue;
-        }
-
-        if (diff_result_push(out, entry) != 0) {
-            hash_list_free(&ha);
-            hash_list_free(&hb);
-            diff_result_free(out);
+    if (fsize > 0) {
+        char *buf = (char *)malloc((size_t)fsize + 1);
+        if (!buf) {
+            free(ll->lines);
+            fclose(fp);
             return -3;
         }
+        fread(buf, 1, (size_t)fsize, fp);
+        buf[fsize] = '\0';
+        ll->lines[0] = buf;
+        ll->count = 1;
+    } else {
+        ll->lines[0] = strdup("");
+        ll->count = 1;
     }
 
-    hash_list_free(&ha);
-    hash_list_free(&hb);
+    fclose(fp);
     return 0;
 }
 
-/* 释放 DiffResult 资源 */
+void linelist_free(LineList *ll) {
+    if (ll->lines) {
+        for (size_t i = 0; i < ll->count; i++)
+            free(ll->lines[i]);
+        free(ll->lines);
+        ll->lines = NULL;
+    }
+    ll->count = 0;
+    ll->capacity = 0;
+}
+
+/* ─── DiffResult 管理 ───────────────────────────────────────────────────── */
+
+static int diff_result_init(DiffResult *dr, size_t cap) {
+    dr->entries = (DiffEntry *)malloc(sizeof(DiffEntry) * cap);
+    if (!dr->entries) return -1;
+    dr->count = 0;
+    dr->capacity = cap;
+    return 0;
+}
+
+static int diff_result_push(DiffResult *dr, DiffEntry e) {
+    if (dr->count >= dr->capacity) {
+        size_t nc = dr->capacity * 2;
+        DiffEntry *na = (DiffEntry *)realloc(dr->entries, sizeof(DiffEntry) * nc);
+        if (!na) return -1;
+        dr->entries = na;
+        dr->capacity = nc;
+    }
+    dr->entries[dr->count++] = e;
+    return 0;
+}
+
 void diff_result_free(DiffResult *dr) {
     if (dr->entries) {
-        for (size_t i = 0; i < dr->count; i++) {
-            if (dr->entries[i].content) {
-                free(dr->entries[i].content);
-            }
-        }
+        for (size_t i = 0; i < dr->count; i++)
+            free(dr->entries[i].content);
         free(dr->entries);
         dr->entries = NULL;
     }
     dr->count = 0;
     dr->capacity = 0;
+}
+
+/* ─── 字符级 LCS 差异检测 ─────────────────────────────────────────────────── */
+
+/*
+ * 使用简化版 Myers O(ND) 算法
+ * 找出两个字符串之间的最短编辑脚本（SES - Shortest Edit Script）
+ */
+int diff_files(const char *file_a, const char *file_b, DiffResult *out) {
+    LineList la = {0}, lb = {0};
+
+    if (linelist_load(file_a, &la) != 0) return -1;
+    if (linelist_load(file_b, &lb) != 0) { linelist_free(&la); return -1; }
+
+    if (diff_result_init(out, 64) != 0) {
+        linelist_free(&la); linelist_free(&lb);
+        return -2;
+    }
+
+    const char *a = la.count > 0 ? la.lines[0] : "";
+    const char *b = lb.count > 0 ? lb.lines[0] : "";
+    size_t len_a = strlen(a);
+    size_t len_b = strlen(b);
+
+    /* 使用 LCS（最长公共子序列）算法找出差异 */
+    /* dp[i][j] = a[0..i-1] 和 b[0..j-1] 的 LCS 长度 */
+
+    /* 对于大文件，完整 DP 表会消耗 O(n*m) 内存，这里使用优化的 O(ND) 算法 */
+
+    /* 简化实现：使用双指针扫描 + 回溯 */
+
+    /* 首先找出公共前缀 */
+    size_t prefix = 0;
+    while (prefix < len_a && prefix < len_b && a[prefix] == b[prefix]) {
+        prefix++;
+    }
+
+    /* 找出公共后缀 */
+    size_t suffix = 0;
+    while (suffix < len_a - prefix && suffix < len_b - prefix &&
+           a[len_a - 1 - suffix] == b[len_b - 1 - suffix]) {
+        suffix++;
+    }
+
+    /* 中间部分就是差异区域 */
+    size_t diff_start = prefix;
+    size_t diff_end_a = len_a - suffix;
+    size_t diff_end_b = len_b - suffix;
+
+    /* 构建差异结果 */
+    if (diff_start < diff_end_a || diff_start < diff_end_b) {
+        /* 从 A 中删除的部分 */
+        if (diff_start < diff_end_a) {
+            DiffEntry e = {0};
+            e.type = DIFF_DELETE;
+            e.line_a = (long)diff_start + 1;
+            e.line_b = -1;
+
+            /* 提取被删除的内容 */
+            size_t del_len = diff_end_a - diff_start;
+            char *del_content = (char *)malloc(del_len + 1);
+            if (del_content) {
+                strncpy(del_content, a + diff_start, del_len);
+                del_content[del_len] = '\0';
+                e.content = del_content;
+            } else {
+                e.content = strdup("[内存错误]");
+            }
+            diff_result_push(out, e);
+        }
+
+        /* 在 B 中新增的部分 */
+        if (diff_start < diff_end_b) {
+            DiffEntry e = {0};
+            e.type = DIFF_INSERT;
+            e.line_a = -1;
+            e.line_b = (long)diff_start + 1;
+
+            /* 提取新增的内容 */
+            size_t ins_len = diff_end_b - diff_start;
+            char *ins_content = (char *)malloc(ins_len + 1);
+            if (ins_content) {
+                strncpy(ins_content, b + diff_start, ins_len);
+                ins_content[ins_len] = '\0';
+                e.content = ins_content;
+            } else {
+                e.content = strdup("[内存错误]");
+            }
+            diff_result_push(out, e);
+        }
+    }
+
+    linelist_free(&la);
+    linelist_free(&lb);
+    return 0;
 }

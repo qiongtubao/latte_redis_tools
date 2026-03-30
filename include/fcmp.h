@@ -6,9 +6,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* 默认分块大小 4KB */
-#ifndef FILE_CHUNK_SIZE
-#define FILE_CHUNK_SIZE 4096
+/* 行缓冲区大小 */
+#ifndef LINE_BUF_SIZE
+#define LINE_BUF_SIZE 65536
 #endif
 
 /* 默认内存上限 512MB */
@@ -25,32 +25,16 @@ typedef enum {
     DIFF_MODIFY = 3    /* 覆盖/修改内容 */
 } DiffType;
 
-/* ─── 分块读取器 ──────────────────────────────────────── */
+/* ─── 行数据结构 ────────────────────────────────────────── */
 
 typedef struct {
-    FILE    *fp;
-    size_t   chunk_size;
-    uint8_t *buffer;
-    size_t   bytes_read;
-    bool     eof;
-} ChunkReader;
+    char   **lines;      /* 行内容数组 */
+    size_t   count;      /* 行数 */
+    size_t   capacity;   /* 容量 */
+} LineList;
 
-int  reader_open(ChunkReader *r, const char *path, size_t chunk_size);
-int  reader_read_chunk(ChunkReader *r);
-void reader_close(ChunkReader *r);
-
-/* ─── 哈希模块 ────────────────────────────────────────── */
-
-uint32_t hash_block(const uint8_t *data, size_t len);
-
-typedef struct {
-    uint32_t *hashes;
-    size_t    count;
-    size_t    capacity;
-} HashList;
-
-int hash_file(const char *path, size_t chunk_size, HashList *out);
-void hash_list_free(HashList *hl);
+int  linelist_load(const char *path, LineList *ll);
+void linelist_free(LineList *ll);
 
 /* ─── 差异检测 ────────────────────────────────────────── */
 
@@ -58,7 +42,7 @@ typedef struct {
     DiffType  type;
     long      line_a;   /* 文件 A 中的行号（-1 表示无对应行） */
     long      line_b;   /* 文件 B 中的行号（-1 表示无对应行） */
-    char     *content;  /* 差异内容 */
+    char     *content;  /* 差异内容（B 文件中的行内容） */
 } DiffEntry;
 
 typedef struct {
@@ -67,7 +51,7 @@ typedef struct {
     size_t     capacity;
 } DiffResult;
 
-int  diff_files(const char *file_a, const char *file_b, size_t chunk_size, DiffResult *out);
+int  diff_files(const char *file_a, const char *file_b, DiffResult *out);
 void diff_result_free(DiffResult *dr);
 
 /* ─── 输出模块 ────────────────────────────────────────── */

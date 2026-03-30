@@ -6,10 +6,10 @@ INCDIR  = include
 BUILDDIR = bin
 TESTDIR = tests
 
-# 默认块大小 4KB
-DEFINES = -DFILE_CHUNK_SIZE=4096 -DMEM_LIMIT_MB=512
+DEFINES = -DMEM_LIMIT_MB=512
 
-SRCS    = $(wildcard $(SRCDIR)/*.c)
+# 只编译需要的源文件（移除 hash.c 和 reader.c）
+SRCS    = $(filter-out $(SRCDIR)/hash.c $(SRCDIR)/reader.c, $(wildcard $(SRCDIR)/*.c))
 OBJS    = $(patsubst $(SRCDIR)/%.c,$(BUILDDIR)/%.o,$(SRCS))
 TARGET  = $(BUILDDIR)/fcmp
 
