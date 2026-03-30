@@ -31,6 +31,7 @@ typedef struct {
     char   **lines;      /* 行内容数组 */
     size_t   count;      /* 行数 */
     size_t   capacity;   /* 容量 */
+    size_t   data_len;   /* 实际数据长度（二进制安全，不依赖 strlen） */
 } LineList;
 
 int  linelist_load(const char *path, LineList *ll);
