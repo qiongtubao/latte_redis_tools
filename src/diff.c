@@ -1,38 +1,42 @@
-// src/diff.c — 字符级差异检测引擎（Myers O(ND) 简化版）
+// src/diff.c — 字符级差异检测引擎（LCS 算法）
 #include "fcmp.h"
 #include <string.h>
 
-/* ─── LineList: 加载文件为单个字符串（用于字符级对比）────────────────── */
+/* ─── 配置 ────────────────────────────────────────────── */
+
+/* 字符级 LCS 最大区域大小（超过则降级为块对比） */
+#define LCS_CHAR_LIMIT 10000
+
+/* 大文件降级块大小 */
+#define FALLBACK_BLOCK 64
+
+/* ─── 文件加载（支持二进制，使用 fsize 而非 strlen）────────────────────── */
 
 int linelist_load(const char *path, LineList *ll) {
     FILE *fp = fopen(path, "rb");
     if (!fp) return -1;
 
-    /* 读取整个文件到一个缓冲区 */
     fseek(fp, 0, SEEK_END);
     long fsize = ftell(fp);
     fseek(fp, 0, SEEK_SET);
 
-    /* 单行存储整个文件内容（字符级对比不需要分行） */
-    ll->capacity = 1;
-    ll->lines = (char **)malloc(sizeof(char *) * 1);
+    ll->capacity = 2;
+    ll->lines = (char **)malloc(sizeof(char *) * 2);
     if (!ll->lines) { fclose(fp); return -2; }
     ll->count = 0;
 
     if (fsize > 0) {
         char *buf = (char *)malloc((size_t)fsize + 1);
-        if (!buf) {
-            free(ll->lines);
-            fclose(fp);
-            return -3;
-        }
-        fread(buf, 1, (size_t)fsize, fp);
-        buf[fsize] = '\0';
+        if (!buf) { free(ll->lines); fclose(fp); return -3; }
+        size_t nread = fread(buf, 1, (size_t)fsize, fp);
+        buf[nread] = '\0';
         ll->lines[0] = buf;
-        ll->count = 1;
+        ll->lines[1] = NULL;
+        ll->count = 2; /* lines[0]=data, lines[1]=NULL 终止标记 */
     } else {
         ll->lines[0] = strdup("");
-        ll->count = 1;
+        ll->lines[1] = NULL;
+        ll->count = 2;
     }
 
     fclose(fp);
@@ -83,12 +87,193 @@ void diff_result_free(DiffResult *dr) {
     dr->capacity = 0;
 }
 
-/* ─── 字符级 LCS 差异检测 ─────────────────────────────────────────────────── */
+/* ─── LCS 字符级 Diff ───────────────────────────────────────────────────── */
 
 /*
- * 使用简化版 Myers O(ND) 算法
- * 找出两个字符串之间的最短编辑脚本（SES - Shortest Edit Script）
+ * 对两个差异区域做字符级 LCS，生成编辑脚本
+ * a, na: A 文件的差异区域
+ * b, nb: B 文件的差异区域
+ * pos_offset: 该区域在原始文件中的起始偏移
  */
+static int lcs_diff_region(
+    const char *a, size_t na,
+    const char *b, size_t nb,
+    long pos_offset,
+    DiffResult *out
+) {
+    /* 一方为空 */
+    if (na == 0) {
+        DiffEntry e = {0};
+        e.type = DIFF_INSERT;
+        e.line_a = -1;
+        e.line_b = pos_offset + 1;
+        e.content = (char *)malloc(nb + 1);
+        if (e.content) { memcpy(e.content, b, nb); e.content[nb] = '\0'; }
+        diff_result_push(out, e);
+        return 0;
+    }
+    if (nb == 0) {
+        DiffEntry e = {0};
+        e.type = DIFF_DELETE;
+        e.line_a = pos_offset + 1;
+        e.line_b = -1;
+        e.content = (char *)malloc(na + 1);
+        if (e.content) { memcpy(e.content, a, na); e.content[na] = '\0'; }
+        diff_result_push(out, e);
+        return 0;
+    }
+
+    /* 大区域降级：按块逐一对比 */
+    if (na > LCS_CHAR_LIMIT || nb > LCS_CHAR_LIMIT) {
+        size_t i = 0, j = 0;
+        while (i < na || j < nb) {
+            size_t block_a = na - i;
+            size_t block_b = nb - j;
+            if (block_a > FALLBACK_BLOCK) block_a = FALLBACK_BLOCK;
+            if (block_b > FALLBACK_BLOCK) block_b = FALLBACK_BLOCK;
+
+            if (block_a == block_b && memcmp(a + i, b + j, block_a) == 0) {
+                /* 块相同，跳过 */
+                i += block_a;
+                j += block_b;
+            } else if (block_b > 0 && block_a == 0) {
+                DiffEntry e = {0};
+                e.type = DIFF_INSERT;
+                e.line_a = -1;
+                e.line_b = pos_offset + (long)j + 1;
+                e.content = (char *)malloc(block_b + 1);
+                if (e.content) { memcpy(e.content, b + j, block_b); e.content[block_b] = '\0'; }
+                diff_result_push(out, e);
+                j += block_b;
+            } else if (block_a > 0 && block_b == 0) {
+                DiffEntry e = {0};
+                e.type = DIFF_DELETE;
+                e.line_a = pos_offset + (long)i + 1;
+                e.line_b = -1;
+                e.content = (char *)malloc(block_a + 1);
+                if (e.content) { memcpy(e.content, a + i, block_a); e.content[block_a] = '\0'; }
+                diff_result_push(out, e);
+                i += block_a;
+            } else {
+                /* 两边都有但不同 → 先输出 DELETE 再 INSERT */
+                DiffEntry de = {0};
+                de.type = DIFF_DELETE;
+                de.line_a = pos_offset + (long)i + 1;
+                de.line_b = -1;
+                de.content = (char *)malloc(block_a + 1);
+                if (de.content) { memcpy(de.content, a + i, block_a); de.content[block_a] = '\0'; }
+                diff_result_push(out, de);
+
+                DiffEntry ie = {0};
+                ie.type = DIFF_INSERT;
+                ie.line_a = -1;
+                ie.line_b = pos_offset + (long)j + 1;
+                ie.content = (char *)malloc(block_b + 1);
+                if (ie.content) { memcpy(ie.content, b + j, block_b); ie.content[block_b] = '\0'; }
+                diff_result_push(out, ie);
+
+                i += block_a;
+                j += block_b;
+            }
+        }
+        return 0;
+    }
+
+    /* 标准 LCS DP + 回溯 */
+    size_t rows = na + 1, cols = nb + 1;
+    int *dp = (int *)malloc(rows * cols * sizeof(int));
+    if (!dp) return -1;
+
+    #define DP(r, c) dp[(r) * cols + (c)]
+
+    for (size_t i = 0; i <= na; i++) DP(i, 0) = 0;
+    for (size_t j = 0; j <= nb; j++) DP(0, j) = 0;
+
+    for (size_t i = 1; i <= na; i++) {
+        for (size_t j = 1; j <= nb; j++) {
+            if (a[i - 1] == b[j - 1]) {
+                DP(i, j) = DP(i - 1, j - 1) + 1;
+            } else {
+                DP(i, j) = DP(i - 1, j) > DP(i, j - 1) ? DP(i - 1, j) : DP(i, j - 1);
+            }
+        }
+    }
+
+    /* 回溯，收集编辑操作（从后向前） */
+    typedef struct { DiffType type; long pos; char ch; } EditOp;
+    EditOp *ops = (EditOp *)malloc((na + nb) * sizeof(EditOp));
+    int opcount = 0;
+
+    size_t i = na, j = nb;
+    while (i > 0 || j > 0) {
+        if (i > 0 && j > 0 && a[i - 1] == b[j - 1]) {
+            i--; j--;
+        } else if (j > 0 && (i == 0 || DP(i, j - 1) >= DP(i - 1, j))) {
+            ops[opcount].type = DIFF_INSERT;
+            ops[opcount].pos = (long)(j - 1) + pos_offset + 1;
+            ops[opcount].ch = b[j - 1];
+            opcount++;
+            j--;
+        } else {
+            ops[opcount].type = DIFF_DELETE;
+            ops[opcount].pos = (long)(i - 1) + pos_offset + 1;
+            ops[opcount].ch = a[i - 1];
+            opcount++;
+            i--;
+        }
+    }
+
+    /* 反转（改为从前向后） */
+    for (int k = 0; k < opcount / 2; k++) {
+        EditOp tmp = ops[k];
+        ops[k] = ops[opcount - 1 - k];
+        ops[opcount - 1 - k] = tmp;
+    }
+
+    /* 合并连续相同类型操作 */
+    int k = 0;
+    while (k < opcount) {
+        DiffType cur_type = ops[k].type;
+        long first_pos = ops[k].pos;
+
+        /* 收集连续内容 */
+        size_t buf_cap = 64;
+        char *buf = (char *)malloc(buf_cap);
+        size_t blen = 0;
+
+        while (k < opcount && ops[k].type == cur_type) {
+            if (blen + 2 >= buf_cap) {
+                buf_cap *= 2;
+                buf = (char *)realloc(buf, buf_cap);
+            }
+            buf[blen++] = ops[k].ch;
+            k++;
+        }
+        buf[blen] = '\0';
+
+        DiffEntry e = {0};
+        e.type = cur_type;
+        e.content = buf;
+
+        if (cur_type == DIFF_DELETE) {
+            e.line_a = first_pos;
+            e.line_b = -1;
+        } else {
+            e.line_a = -1;
+            e.line_b = first_pos;
+        }
+
+        diff_result_push(out, e);
+    }
+
+    free(ops);
+    free(dp);
+    #undef DP
+    return 0;
+}
+
+/* ─── 主函数 ──────────────────────────────────────────── */
+
 int diff_files(const char *file_a, const char *file_b, DiffResult *out) {
     LineList la = {0}, lb = {0};
 
@@ -105,72 +290,26 @@ int diff_files(const char *file_a, const char *file_b, DiffResult *out) {
     size_t len_a = strlen(a);
     size_t len_b = strlen(b);
 
-    /* 使用 LCS（最长公共子序列）算法找出差异 */
-    /* dp[i][j] = a[0..i-1] 和 b[0..j-1] 的 LCS 长度 */
-
-    /* 对于大文件，完整 DP 表会消耗 O(n*m) 内存，这里使用优化的 O(ND) 算法 */
-
-    /* 简化实现：使用双指针扫描 + 回溯 */
-
-    /* 首先找出公共前缀 */
+    /* 1. 找公共前缀 */
     size_t prefix = 0;
     while (prefix < len_a && prefix < len_b && a[prefix] == b[prefix]) {
         prefix++;
     }
 
-    /* 找出公共后缀 */
+    /* 2. 找公共后缀 */
     size_t suffix = 0;
     while (suffix < len_a - prefix && suffix < len_b - prefix &&
            a[len_a - 1 - suffix] == b[len_b - 1 - suffix]) {
         suffix++;
     }
 
-    /* 中间部分就是差异区域 */
-    size_t diff_start = prefix;
-    size_t diff_end_a = len_a - suffix;
-    size_t diff_end_b = len_b - suffix;
+    /* 3. 中间差异区域 */
+    size_t na = len_a - prefix - suffix;
+    size_t nb = len_b - prefix - suffix;
 
-    /* 构建差异结果 */
-    if (diff_start < diff_end_a || diff_start < diff_end_b) {
-        /* 从 A 中删除的部分 */
-        if (diff_start < diff_end_a) {
-            DiffEntry e = {0};
-            e.type = DIFF_DELETE;
-            e.line_a = (long)diff_start + 1;
-            e.line_b = -1;
-
-            /* 提取被删除的内容 */
-            size_t del_len = diff_end_a - diff_start;
-            char *del_content = (char *)malloc(del_len + 1);
-            if (del_content) {
-                strncpy(del_content, a + diff_start, del_len);
-                del_content[del_len] = '\0';
-                e.content = del_content;
-            } else {
-                e.content = strdup("[内存错误]");
-            }
-            diff_result_push(out, e);
-        }
-
-        /* 在 B 中新增的部分 */
-        if (diff_start < diff_end_b) {
-            DiffEntry e = {0};
-            e.type = DIFF_INSERT;
-            e.line_a = -1;
-            e.line_b = (long)diff_start + 1;
-
-            /* 提取新增的内容 */
-            size_t ins_len = diff_end_b - diff_start;
-            char *ins_content = (char *)malloc(ins_len + 1);
-            if (ins_content) {
-                strncpy(ins_content, b + diff_start, ins_len);
-                ins_content[ins_len] = '\0';
-                e.content = ins_content;
-            } else {
-                e.content = strdup("[内存错误]");
-            }
-            diff_result_push(out, e);
-        }
+    if (na > 0 || nb > 0) {
+        lcs_diff_region(a + prefix, na, b + prefix, nb,
+                        (long)prefix, out);
     }
 
     linelist_free(&la);
