@@ -1,0 +1,11 @@
+{
+  "name": "latte_redis_tools",
+  "description": "大文件对比工具 —— 对比两个大文件，检测内容的增加、覆盖、删除，采用分块读取策略防止内存溢出",
+  "techStack": "C",
+  "port": 3000,
+  "model": "claude-sonnet-4-5",
+  "maxTokensPerSession": 8000,
+  "executor": "sdk",
+  "testCommand": "make test",
+  "startCommand": "./bin/fcmp"
+}

@@ -1,0 +1,151 @@
+[
+  {
+    "id": "F001",
+    "category": "Core",
+    "priority": 1,
+    "description": "项目框架初始化：C 项目目录结构、Makefile、头文件声明",
+    "steps": [
+      "创建 src/ include/ bin/ 目录结构",
+      "编写 Makefile 支持 build/test/clean",
+      "编写 include/fcmp.h 主头文件，声明公共接口",
+      "运行 make build 编译通过"
+    ],
+    "tests": [
+      "make build 无编译错误",
+      "bin/fcmp 可执行文件生成",
+      "include/fcmp.h 包含必要的头文件保护和类型声明"
+    ],
+    "passes": false
+  },
+  {
+    "id": "F002",
+    "category": "Core",
+    "priority": 2,
+    "description": "分块文件读取器：按固定块大小读取大文件，避免一次性加载到内存",
+    "steps": [
+      "实现 src/reader.c 分块读取接口",
+      "定义 FILE_CHUNK_SIZE 默认为 4KB",
+      "实现 reader_open / reader_read_chunk / reader_close 函数",
+      "处理文件打开失败、读取错误等异常情况"
+    ],
+    "tests": [
+      "能正确打开并读取 1MB 文件",
+      "分块读取结果与一次性 fread 结果一致",
+      "文件不存在时返回明确错误码",
+      "读取过程中内存占用稳定不增长"
+    ],
+    "passes": false
+  },
+  {
+    "id": "F003",
+    "category": "Core",
+    "priority": 3,
+    "description": "文件哈希校验模块：对每个分块计算哈希值，用于快速比较内容是否相同",
+    "steps": [
+      "实现 src/hash.c 哈希计算模块",
+      "支持 CRC32 或简单快速哈希算法",
+      "实现 hash_file_blocks 对整个文件分块生成哈希列表",
+      "输出哈希列表用于后续逐块对比"
+    ],
+    "tests": [
+      "相同内容的两个文件哈希列表完全一致",
+      "不同内容的文件哈希列表有差异",
+      "空文件返回空哈希列表",
+      "大文件（100MB+）处理不 OOM"
+    ],
+    "passes": false
+  },
+  {
+    "id": "F004",
+    "category": "Core",
+    "priority": 4,
+    "description": "差异检测引擎：基于分块哈希对比两个文件，识别增加、覆盖、删除的内容",
+    "steps": [
+      "实现 src/diff.c 差异检测核心逻辑",
+      "使用 LCS（最长公共子序列）算法或哈希滑动窗口策略",
+      "输出三类差异：INSERT（新增行）、DELETE（删除行）、MODIFY（覆盖行）",
+      "支持按行号定位差异位置"
+    ],
+    "tests": [
+      "A文件比B文件多出一行时检测到 INSERT",
+      "B文件比A文件少了一行时检测到 DELETE",
+      "同一行内容不同时检测到 MODIFY",
+      "两个完全相同的文件检测结果为空"
+    ],
+    "passes": false
+  },
+  {
+    "id": "F005",
+    "category": "Core",
+    "priority": 5,
+    "description": "CLI 参数解析：支持传入两个文件路径、可选参数（块大小、输出格式）",
+    "steps": [
+      "实现 src/main.c 命令行入口",
+      "解析必选参数：file_a, file_b",
+      "解析可选参数：--chunk-size（块大小）、--output（输出格式 json/text）",
+      "参数校验：文件存在性检查、路径合法性"
+    ],
+    "tests": [
+      "fcmp file_a file_b 正常执行",
+      "缺少参数时打印用法提示",
+      "文件不存在时打印明确错误信息",
+      "--chunk-size 参数正确传递到读取模块"
+    ],
+    "passes": false
+  },
+  {
+    "id": "F006",
+    "category": "Data",
+    "priority": 6,
+    "description": "差异结果输出：支持文本格式和 JSON 格式输出对比结果",
+    "steps": [
+      "实现 src/output.c 结果格式化输出模块",
+      "文本格式：人类可读的差异报告（类似 diff -u）",
+      "JSON 格式：结构化的差异数据（便于程序处理）",
+      "包含统计信息：新增行数、删除行数、覆盖行数"
+    ],
+    "tests": [
+      "文本输出格式正确显示行号和差异内容",
+      "JSON 输出可被 jq 正确解析",
+      "统计数字与实际差异数量一致",
+      "空差异时输出友好提示"
+    ],
+    "passes": false
+  },
+  {
+    "id": "F007",
+    "category": "Performance",
+    "priority": 7,
+    "description": "内存保护机制：监控运行时内存占用，超限时优雅降级或终止",
+    "steps": [
+      "实现内存使用监控 src/mem_guard.c",
+      "设置默认内存上限（如 512MB）",
+      "超过阈值时切换到更小的块大小或流式处理",
+      "内存耗尽时输出诊断信息并安全退出"
+    ],
+    "tests": [
+      "处理超大文件时内存占用不超过设定上限",
+      "内存接近上限时自动降低块大小",
+      "内存不足时程序安全退出且输出有意义的错误信息"
+    ],
+    "passes": false
+  },
+  {
+    "id": "F008",
+    "category": "Core",
+    "priority": 8,
+    "description": "端到端集成测试：使用 make test 验证完整流程",
+    "steps": [
+      "编写 tests/ 目录下的测试用例",
+      "准备测试用的大文件样本（生成脚本）",
+      "验证完整流程：参数解析 → 分块读取 → 哈希对比 → 差异检测 → 结果输出",
+      "运行 make test 全部通过"
+    ],
+    "tests": [
+      "make test 全部通过",
+      "测试覆盖正常场景和边界场景",
+      "大文件测试不导致 OOM"
+    ],
+    "passes": false
+  }
+]
